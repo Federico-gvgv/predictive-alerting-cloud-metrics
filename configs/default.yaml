@@ -4,10 +4,24 @@
 
 # ---- Data source ------------------------------------------------------------
 dataset:
-  name: "cloud_metrics"                 # dataset identifier
-  path: "data/raw"                      # path to raw CSV / Parquet files
-  target_metric: "cpu_utilization"      # column to predict
-  resample_interval: "5min"             # resample frequency
+  source: "nab"                         # "nab" | "synthetic"
+
+  # NAB-specific options
+  nab:
+    data_dir: "data/nab"                # local directory for NAB data
+    subset: "realKnownCause"            # subdirectory under NAB/data/
+    files: null                         # null = all files in subset
+    auto_download: true                 # download NAB zip if not present
+
+  # Synthetic fallback options
+  synthetic:
+    n_samples: 5000
+    freq: "5min"
+    n_regimes: 3
+    n_spikes: 10
+
+  target_metric: "value"                # column to predict
+  resample_interval: null               # null = keep original frequency
 
 # ---- Sliding-window parameters ----------------------------------------------
 windowing:
