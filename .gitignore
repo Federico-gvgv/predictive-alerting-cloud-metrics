@@ -1,0 +1,44 @@
+# ---------- Byte-compiled / optimised ----------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ---------- Distribution / packaging ----------
+build/
+dist/
+*.egg-info/
+*.egg
+
+# ---------- Virtual environments ----------
+.venv/
+venv/
+ENV/
+
+# ---------- IDE / editor ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---------- OS ----------
+.DS_Store
+Thumbs.db
+
+# ---------- Jupyter ----------
+.ipynb_checkpoints/
+
+# ---------- Testing / coverage ----------
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ---------- Project artefacts ----------
+outputs/
+logs/
+checkpoints/
+wandb/
+*.pt
+*.pth
+*.ckpt

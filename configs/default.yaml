@@ -1,0 +1,49 @@
+# =============================================================================
+#  Predictive Alerting for Cloud Metrics – default experiment configuration
+# =============================================================================
+
+# ---- Data source ------------------------------------------------------------
+dataset:
+  name: "cloud_metrics"                 # dataset identifier
+  path: "data/raw"                      # path to raw CSV / Parquet files
+  target_metric: "cpu_utilization"      # column to predict
+  resample_interval: "5min"             # resample frequency
+
+# ---- Sliding-window parameters ----------------------------------------------
+windowing:
+  W: 120          # look-back window   (number of time-steps)
+  H: 30           # forecast horizon   (number of time-steps)
+  stride: 1       # step between consecutive windows
+
+# ---- Train / val / test split -----------------------------------------------
+split:
+  train_ratio: 0.7
+  val_ratio:   0.15
+  test_ratio:  0.15
+
+# ---- Training hyper-parameters ----------------------------------------------
+training:
+  seed: 42
+  epochs: 50
+  batch_size: 64
+  learning_rate: 1.0e-3
+  early_stopping_patience: 5
+  output_dir: "outputs"
+
+# ---- Evaluation -------------------------------------------------------------
+evaluation:
+  alert_threshold: 0.8                  # normalised threshold for alerting
+  cooldown: 10                          # minimum steps between consecutive alerts
+  metrics:
+    - "mae"
+    - "rmse"
+    - "precision"
+    - "recall"
+    - "f1"
+
+# ---- Model ------------------------------------------------------------------
+model:
+  model_choice: "lstm"                  # one of: lstm | transformer | baseline
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.1
