@@ -4,17 +4,21 @@ Usage::
 
     python -m src.train --config configs/default.yaml
 
-Loads the dataset, builds sliding windows, splits into train / val / test,
-prints dataset statistics, and stubs the model training loop.
+Loads the dataset, builds sliding windows, splits, trains the selected
+model, and saves artifacts to the output directory.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import shutil
+from pathlib import Path
 
 from src.data import load_dataset
 from src.data.splits import time_split
 from src.data.windowing import create_windows
+from src.models import get_model
 from src.utils.config import load_config, pretty_print_config
 from src.utils.logging import get_logger, set_seed
 
@@ -68,7 +72,6 @@ def main(argv: list[str] | None = None) -> None:
         test_ratio=split_cfg.get("test_ratio", 0.15),
     )
 
-    # ── 4. Summary statistics ────────────────────────────────────────
     for name, (sx, sy, st) in splits.items():
         logger.info(
             "  %s: %d windows, incident rate %.2f%%",
@@ -77,20 +80,30 @@ def main(argv: list[str] | None = None) -> None:
             sy.mean() * 100,
         )
 
-    # ------------------------------------------------------------------
-    # TODO – implement the following steps:
-    #   4. Instantiate the model  (model_choice=%s)
-    #   5. Training loop with early stopping
-    #   6. Save best checkpoint to output_dir
-    # ------------------------------------------------------------------
+    # ── 4. Train model ───────────────────────────────────────────────
     model_choice = cfg["model"]["model_choice"]
-    logger.info(
-        "Next steps: implement %s model training (W=%d, H=%d).",
-        model_choice,
-        W,
-        H,
-    )
-    logger.info("Training pipeline complete – model training not yet implemented.")
+    logger.info("Training model: %s", model_choice)
+
+    model = get_model(cfg)
+    X_train, y_train, _ = splits["train"]
+    X_val, y_val, _ = splits["val"]
+    model.fit(X_train, y_train, X_val, y_val)
+
+    # ── 5. Save artifacts ────────────────────────────────────────────
+    output_dir = Path(cfg.get("training", {}).get("output_dir", "outputs"))
+    run_dir = output_dir / model_choice
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    model.save(run_dir)
+
+    # Save a copy of the config for reproducibility
+    config_out = run_dir / "config.json"
+    config_out.write_text(json.dumps(cfg, indent=2, default=str), encoding="utf-8")
+
+    logger.info("Artifacts saved to %s.", run_dir)
+    logger.info("Training complete.")
 
 
 if __name__ == "__main__":

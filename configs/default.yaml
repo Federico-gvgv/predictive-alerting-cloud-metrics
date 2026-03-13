@@ -46,18 +46,35 @@ training:
 
 # ---- Evaluation -------------------------------------------------------------
 evaluation:
-  alert_threshold: 0.8                  # normalised threshold for alerting
+  alert_threshold: 0.5                  # probability threshold for binary alerts
   cooldown: 10                          # minimum steps between consecutive alerts
   metrics:
-    - "mae"
-    - "rmse"
+    - "roc_auc"
+    - "pr_auc"
     - "precision"
     - "recall"
     - "f1"
 
 # ---- Model ------------------------------------------------------------------
 model:
-  model_choice: "lstm"                  # one of: lstm | transformer | baseline
+  model_choice: "logreg"                # "heuristic" | "logreg" | "gbdt" | "lstm" | "transformer"
+
+  # Heuristic baseline
+  heuristic:
+    z_threshold: 2.0
+
+  # Logistic regression
+  logreg:
+    C: 1.0
+    max_iter: 1000
+
+  # Gradient boosting
+  gbdt:
+    n_estimators: 200
+    max_depth: 4
+    learning_rate: 0.1
+
+  # Deep models (not yet implemented)
   hidden_size: 64
   num_layers: 2
   dropout: 0.1

@@ -24,6 +24,11 @@ predictive-alerting-cloud-metrics/
 │   │   ├── synthetic.py       # synthetic fallback generator
 │   │   ├── windowing.py       # sliding-window extraction
 │   │   └── splits.py          # time-based train/val/test splits
+│   ├── models/
+│   │   ├── __init__.py        # get_model() factory
+│   │   ├── heuristic.py       # z-score spike detector
+│   │   ├── features.py        # tabular feature extractor
+│   │   └── logreg_baseline.py # LogisticRegression / GBDT
 │   └── utils/
 │       ├── __init__.py
 │       ├── config.py          # YAML config loader
@@ -52,21 +57,17 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3. Run the training pipeline
+### 3. Train a model
 
 ```bash
 python -m src.train --config configs/default.yaml
 ```
 
-### 4. Run the evaluation pipeline
+### 4. Evaluate the model
 
 ```bash
 python -m src.eval --config configs/default.yaml
 ```
-
-Both commands load the dataset (NAB by default, with auto-download), build
-sliding windows, split the data, and print dataset statistics.  Model training
-and evaluation are still placeholder TODOs.
 
 ---
 
@@ -91,45 +92,70 @@ that a full CPU run finishes well within 10 minutes.
 
 ### Synthetic fallback
 
-If NAB is unavailable or you want a quick local test, set
-`dataset.source: "synthetic"`:
-
-```yaml
-dataset:
-  source: "synthetic"
-  synthetic:
-    n_samples: 5000
-    freq: "5min"
-    n_regimes: 3
-    n_spikes: 10
-```
-
-The generator produces a time series with a smooth trend, daily seasonality,
-heavy-tailed noise (Student-*t*), regime shifts, and spike injections.  Regime
-shifts and spikes are labelled as **incidents**.
+Set `dataset.source: "synthetic"` for a quick local test without downloading.
 
 ---
 
 ## Windowing & Labelling
-
-For each anchor time-step *t* the pipeline constructs:
 
 | Symbol | Definition | Description |
 | ------ | ---------- | ----------- |
 | **X_t** | `value[t − W + 1 : t + 1]` | Look-back window of *W* time-steps |
 | **y_t** | `1 if any incident in (t, t + H]` | Binary future-incident label |
 
-* **W** (look-back) and **H** (horizon) are set in `configs/default.yaml`
-  under `windowing` (defaults: W = 120, H = 30).
-* An optional **stride** controls the step between consecutive anchors.
-
 ### Leakage avoidance
 
 The train / val / test split is **strictly contiguous by time** – windows are
-never shuffled.  The training set always precedes validation, which always
-precedes test.  Because the sliding window only looks backward (into the past
-*W* steps) and the label only looks forward (into the future *H* steps), there
-is no information flow from the future into training features.
+never shuffled.  The look-back only uses past values; the label only scans
+future steps.
+
+---
+
+## Baseline Models
+
+The project ships three baseline models.  Select one via
+`model.model_choice` in the config:
+
+### `heuristic` – Z-score spike detector
+
+A training-free baseline.  For each window the model computes the z-score of
+the last value relative to the window mean/std and maps it to a risk score
+via `sigmoid(|z| − z_threshold)`.
+
+*Why?*  Establishes a floor – any learning-based model should beat this
+simple statistical rule.
+
+### `logreg` – Logistic Regression *(default)*
+
+Extracts 12 tabular features per window (mean, std, min, max, slope,
+quantiles, EWMA ratio, last value, delta from mean), standardises them,
+and trains a `LogisticRegression` with `class_weight="balanced"`.
+
+*Why?*  A strong, interpretable linear baseline that handles class imbalance
+and runs in seconds.
+
+### `gbdt` – Gradient Boosting
+
+Same feature pipeline as `logreg` but trains a `GradientBoostingClassifier`.
+Generally stronger than logistic regression at the cost of longer training.
+
+### Selecting a model
+
+```yaml
+# configs/default.yaml
+model:
+  model_choice: "logreg"   # or "heuristic" or "gbdt"
+```
+
+### Evaluation metrics
+
+After training, `python -m src.eval` computes:
+
+- **ROC-AUC** – ranking quality across all thresholds
+- **PR-AUC** – precision–recall trade-off (better for imbalanced data)
+- **Precision / Recall / F1** at the configured `alert_threshold`
+
+Results are saved to `outputs/<model_choice>/eval_report.json`.
 
 ---
 
@@ -144,7 +170,7 @@ All hyper-parameters live in `configs/default.yaml`. Key sections:
 | `split`      | Train / val / test ratios                          |
 | `training`   | Epochs, batch size, learning rate, early stopping  |
 | `evaluation` | Alert threshold, cooldown, evaluation metrics      |
-| `model`      | Model choice and architecture hyper-parameters     |
+| `model`      | Model choice and per-model hyper-parameters        |
 
 ## Running Tests
 
