@@ -34,13 +34,11 @@ htmlcov/
 .coverage
 coverage.xml
 
-# ---------- Project artefacts ----------
+# ---------- Downloaded data ----------
+data/
+
+# ---------- Training outputs ----------
 outputs/
 logs/
 checkpoints/
 wandb/
-*.pt
-*.pth
-*.ckpt
-
-data/nab/

@@ -57,7 +57,7 @@ evaluation:
 
 # ---- Model ------------------------------------------------------------------
 model:
-  model_choice: "logreg"                # "heuristic" | "logreg" | "gbdt" | "lstm" | "transformer"
+  model_choice: "logreg"                # "heuristic" | "logreg" | "gbdt" | "tcn"
 
   # Heuristic baseline
   heuristic:
@@ -74,7 +74,9 @@ model:
     max_depth: 4
     learning_rate: 0.1
 
-  # Deep models (not yet implemented)
-  hidden_size: 64
-  num_layers: 2
-  dropout: 0.1
+  # Temporal Convolutional Network
+  tcn:
+    channels: 32
+    kernel_size: 7
+    num_levels: 3
+    dropout: 0.1

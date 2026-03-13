@@ -48,6 +48,10 @@ def _load_model(run_dir: Path, cfg: dict):
         from src.models.logreg_baseline import SklearnBaseline
         return SklearnBaseline.load(run_dir, cfg)
 
+    if model_type == "tcn":
+        from src.models.tcn import TCNModel
+        return TCNModel.load(run_dir, cfg)
+
     raise ValueError(f"Unknown model_type '{model_type}' in {meta_path}.")
 
 

@@ -48,7 +48,12 @@ def get_model(cfg: dict[str, Any]):
 
         return SklearnBaseline(cfg)
 
+    if choice == "tcn":
+        from src.models.tcn import TCNModel
+
+        return TCNModel(cfg)
+
     raise ValueError(
         f"Unknown model_choice '{choice}'. "
-        "Supported: heuristic, logreg, gbdt."
+        "Supported: heuristic, logreg, gbdt, tcn."
     )
