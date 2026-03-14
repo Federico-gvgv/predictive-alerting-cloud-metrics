@@ -24,7 +24,7 @@ def create_windows(
     W: int,
     H: int,
     stride: int = 1,
-) -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex]:
+) -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex, np.ndarray]:
     """Extract sliding windows with binary future-incident labels.
 
     Parameters
@@ -53,41 +53,56 @@ def create_windows(
     ValueError
         If the series is too short to form even one window (``len < W + H``).
     """
-    n = len(df)
-    if n < W + H:
-        raise ValueError(
-            f"Series length ({n}) is shorter than W + H = {W + H}. "
-            "Cannot form any windows."
-        )
+    X_list, y_list, ts_list, sid_list = [], [], [], []
+    if "series_id" not in df.columns:
+        df = df.copy()
+        df["series_id"] = "default"
 
-    values = df["value"].to_numpy(dtype=np.float64)
-    incidents = df["is_incident"].to_numpy(dtype=bool)
-    ts = df["timestamp"].values  # numpy datetime64
+    for sid, group in df.groupby("series_id", sort=False):
+        n = len(group)
+        if n < W + H:
+            logger.warning("Series %s too short (%d < %d). Skipping.", sid, n, W+H)
+            continue
 
-    # Valid anchor indices: t in [W-1, n-H-1] so that
-    #   look-back  = values[t-W+1 : t+1]  has length W
-    #   horizon    = incidents[t+1 : t+H+1]  has length H
-    anchors = np.arange(W - 1, n - H, stride)
+        values = group["value"].to_numpy(dtype=np.float64)
+        incidents = group["is_incident"].to_numpy(dtype=bool)
+        ts = group["timestamp"].values  # numpy datetime64
 
-    X = np.empty((len(anchors), W), dtype=np.float64)
-    y = np.empty(len(anchors), dtype=np.int64)
-    anchor_ts = np.empty(len(anchors), dtype="datetime64[ns]")
+        # Valid anchor indices: t in [W-1, n-H-1]
+        anchors = np.arange(W - 1, n - H, stride)
 
-    for i, t in enumerate(anchors):
-        X[i] = values[t - W + 1 : t + 1]
-        y[i] = int(incidents[t + 1 : t + H + 1].any())
-        anchor_ts[i] = ts[t]
+        X_s = np.empty((len(anchors), W), dtype=np.float64)
+        y_s = np.empty(len(anchors), dtype=np.int64)
+        anchor_ts_s = np.empty(len(anchors), dtype="datetime64[ns]")
 
-    timestamps = pd.DatetimeIndex(anchor_ts)
+        for i, t in enumerate(anchors):
+            X_s[i] = values[t - W + 1 : t + 1]
+            y_s[i] = int(incidents[t + 1 : t + H + 1].any())
+            anchor_ts_s[i] = ts[t]
 
-    n_pos = int(y.sum())
+        X_list.append(X_s)
+        y_list.append(y_s)
+        ts_list.append(anchor_ts_s)
+        sid_list.append(np.full(len(anchors), sid, dtype=object))
+
+    if not X_list:
+        raise ValueError("No series were long enough to form windows.")
+
+    y_cat = np.concatenate(y_list)
+    n_pos = int(y_cat.sum())
+    
     logger.info(
         "Windows created – %d total, %d positive (%.2f%%), W=%d, H=%d, stride=%d.",
-        len(y),
+        len(y_cat),
         n_pos,
-        (n_pos / len(y) * 100) if len(y) else 0.0,
+        (n_pos / len(y_cat) * 100) if len(y_cat) else 0.0,
         W,
         H,
         stride,
     )
-    return X, y, timestamps
+    return (
+        np.vstack(X_list),
+        y_cat,
+        pd.DatetimeIndex(np.concatenate(ts_list)),
+        np.concatenate(sid_list),
+    )

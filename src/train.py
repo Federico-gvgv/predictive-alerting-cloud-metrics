@@ -16,12 +16,13 @@ import json
 import shutil
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from src.data import load_dataset
 from src.data.splits import time_split
 from src.data.windowing import create_windows
-from src.evaluation.metrics import extract_incident_intervals
+from src.evaluation.metrics import extract_incidents_per_series
 from src.evaluation.thresholding import select_threshold
 from src.models import get_model
 from src.utils.config import load_config, pretty_print_config
@@ -60,14 +61,17 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("Raw dataset: %d rows.", len(df))
 
     # ── 2. Build sliding windows ─────────────────────────────────────
-    freq_seconds = df["timestamp"].diff().median().total_seconds()
+    if "series_id" in df.columns:
+        freq_seconds = df.groupby("series_id")["timestamp"].diff().median().total_seconds()
+    else:
+        freq_seconds = df["timestamp"].diff().median().total_seconds()
     logger.info("  Sampling frequency: %.1f seconds.", freq_seconds)
 
     W = cfg["windowing"]["W"]
     H = cfg["windowing"]["H"]
     stride = cfg["windowing"].get("stride", 1)
 
-    X, y, timestamps = create_windows(df, W=W, H=H, stride=stride)
+    X, y, timestamps, series_ids = create_windows(df, W=W, H=H, stride=stride)
 
     # ── 3. Time-based splits ─────────────────────────────────────────
     split_cfg = cfg.get("split", {})
@@ -75,17 +79,20 @@ def main(argv: list[str] | None = None) -> None:
         X,
         y,
         timestamps,
+        series_ids,
         train_ratio=split_cfg.get("train_ratio", 0.7),
         val_ratio=split_cfg.get("val_ratio", 0.15),
         test_ratio=split_cfg.get("test_ratio", 0.15),
     )
 
-    for name, (sx, sy, st) in splits.items():
+    for name, (sx, sy, st, ssid) in splits.items():
+        n_pos = int(sy.sum()) if len(sy) else 0
         logger.info(
-            "  %s: %d windows, incident rate %.2f%%",
+            "  %-5s split: %6d windows, %5d positive (%.2f%%)",
             name,
             len(sy),
-            sy.mean() * 100,
+            n_pos,
+            (n_pos / len(sy) * 100) if len(sy) else 0.0,
         )
 
     # ── 4. Train model ───────────────────────────────────────────────
@@ -93,8 +100,8 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("Training model: %s", model_choice)
 
     model = get_model(cfg)
-    X_train, y_train, _ = splits["train"]
-    X_val, y_val, ts_val = splits["val"]
+    X_train, y_train, _, _ = splits["train"]
+    X_val, y_val, ts_val, sid_val = splits["val"]
     model.fit(X_train, y_train, X_val, y_val)
 
     # ── 5. Save artifacts ────────────────────────────────────────────
@@ -118,17 +125,20 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("Selecting alert threshold on validation set …")
     val_scores = model.predict_proba(X_val)
 
-    val_intervals = extract_incident_intervals(
-        df,
-        start_ts=pd.Timestamp(ts_val.min()),
-        end_ts=pd.Timestamp(ts_val.max()),
-    )
-    logger.info("  Validation incidents: %d intervals.", len(val_intervals))
+    val_bounds = {}
+    for sid in np.unique(sid_val):
+        mask = sid_val == sid
+        val_bounds[sid] = (pd.Timestamp(ts_val[mask].min()), pd.Timestamp(ts_val[mask].max()))
+
+    val_intervals_dict = extract_incidents_per_series(df, bounds_per_series=val_bounds)
+    n_val_incidents = sum(len(v) for v in val_intervals_dict.values())
+    logger.info("  Validation incidents: %d total.", n_val_incidents)
 
     best_threshold, sweep = select_threshold(
         val_scores,
         ts_val,
-        val_intervals,
+        sid_val,
+        val_intervals_dict,
         cooldown=cooldown,
         total_steps=len(y_val),
         target_recall=target_recall,
@@ -140,7 +150,7 @@ def main(argv: list[str] | None = None) -> None:
         "threshold": best_threshold,
         "target_event_recall": target_recall,
         "cooldown": cooldown,
-        "n_val_incidents": len(val_intervals),
+        "n_val_incidents": n_val_incidents,
     }
     (run_dir / "threshold.json").write_text(
         json.dumps(threshold_info, indent=2), encoding="utf-8"

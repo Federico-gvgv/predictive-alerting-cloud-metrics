@@ -75,81 +75,82 @@ def pointwise_metrics(
 # ── Incident interval extraction ────────────────────────────────────────
 
 
-def extract_incident_intervals(
+def extract_incidents_per_series(
     df: pd.DataFrame,
-    start_ts: pd.Timestamp | None = None,
-    end_ts: pd.Timestamp | None = None,
-) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
-    """Extract contiguous incident intervals from the raw dataframe.
+    bounds_per_series: dict[str, tuple[pd.Timestamp, pd.Timestamp]] | None = None,
+) -> dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]:
+    """Extract contiguous incident intervals per series from the raw dataframe.
 
     Parameters
     ----------
     df:
-        DataFrame with ``timestamp`` and ``is_incident`` columns.
-    start_ts, end_ts:
-        Optional time boundaries to restrict to a specific split.
+        DataFrame with ``timestamp``, ``is_incident``, and ``series_id`` columns.
+    bounds_per_series:
+        Optional time boundaries ``(start, end)`` per ``series_id`` to restrict extraction.
 
     Returns
     -------
-    List of ``(interval_start, interval_end)`` tuples.
+    dict mapping ``series_id`` to a list of ``(interval_start, interval_end)`` tuples.
     """
-    sub = df.copy()
-    if start_ts is not None:
-        sub = sub[sub["timestamp"] >= start_ts]
-    if end_ts is not None:
-        sub = sub[sub["timestamp"] <= end_ts]
-
-    sub = sub.sort_values("timestamp").reset_index(drop=True)
-    incident = sub["is_incident"].astype(bool).values
-    ts = sub["timestamp"].values
-
-    intervals: list[tuple[pd.Timestamp, pd.Timestamp]] = []
-    in_incident = False
-    i_start = 0
-
-    for i in range(len(incident)):
-        if incident[i] and not in_incident:
-            in_incident = True
-            i_start = i
-        elif not incident[i] and in_incident:
-            in_incident = False
-            intervals.append((pd.Timestamp(ts[i_start]), pd.Timestamp(ts[i - 1])))
-
-    # Close trailing interval
-    if in_incident:
-        intervals.append((pd.Timestamp(ts[i_start]), pd.Timestamp(ts[len(incident) - 1])))
-
-    return intervals
+    res = {}
+    if "series_id" not in df.columns:
+        df = df.copy()
+        df["series_id"] = "default"
+        
+    for sid, group in df.groupby("series_id", sort=False):
+        sub = group.copy()
+        if bounds_per_series and sid in bounds_per_series:
+            start_ts, end_ts = bounds_per_series[sid]
+            sub = sub[(sub["timestamp"] >= start_ts) & (sub["timestamp"] <= end_ts)]
+            
+        sub = sub.sort_values("timestamp").reset_index(drop=True)
+        incident = sub["is_incident"].astype(bool).values
+        ts = sub["timestamp"].values
+        
+        intervals: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        in_incident = False
+        i_start = 0
+        
+        for i in range(len(incident)):
+            if incident[i] and not in_incident:
+                in_incident = True
+                i_start = i
+            elif not incident[i] and in_incident:
+                in_incident = False
+                intervals.append((pd.Timestamp(ts[i_start]), pd.Timestamp(ts[i - 1])))
+                
+        if in_incident:
+            intervals.append((pd.Timestamp(ts[i_start]), pd.Timestamp(ts[len(incident) - 1])))
+            
+        res[sid] = intervals
+        
+    return res
 
 
 # ── Event-level metrics ─────────────────────────────────────────────────
 
 
 def event_metrics(
-    alert_times: list[pd.Timestamp],
-    incident_intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
+    alert_times_dict: dict[str, list[pd.Timestamp]],
+    incidents_dict: dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]],
     total_steps: int,
     max_lead_steps: int | None = None,
     freq_seconds: float | None = None,
 ) -> dict[str, object]:
-    """Compute event-level alerting metrics.
+    """Compute event-level alerting metrics aggregated across multiple series.
 
     An incident is **detected** if at least one alert fires strictly
     *before* the incident's ``start_ts`` **and** within the maximum lead
-    window.  When ``max_lead_steps`` is set, the valid detection window
-    for an incident starting at *t* is::
-
-        [t − max_lead_steps * freq, t)
-
+    window for the same ``series_id``.
+    
     Parameters
     ----------
-    alert_times:
-        Sorted list of timestamps where alerts were emitted.
-    incident_intervals:
-        List of ``(start, end)`` tuples (sorted by start).
+    alert_times_dict:
+        Dict mapping series_id to sorted lists of alert timestamps.
+    incidents_dict:
+        Dict mapping series_id to list of ``(start, end)`` intervals.
     total_steps:
-        Total number of time-steps in the evaluation window (for FP
-        normalisation).
+        Total number of time-steps combined across all series.
     max_lead_steps:
         Maximum lead time in time-steps.  If ``None`` any alert before
         the incident counts (legacy behaviour).
@@ -165,54 +166,53 @@ def event_metrics(
         lead_times (list of lead time in steps),
         lead_time_median_steps, lead_time_iqr_steps,
     """
-    n_incidents = len(incident_intervals)
+    n_incidents = sum(len(ivs) for ivs in incidents_dict.values())
     if n_incidents == 0:
+        fp_count = sum(len(at) for at in alert_times_dict.values())
         return {
             "event_recall": float("nan"),
             "n_detected": 0,
             "n_incidents": 0,
-            "fp_count": len(alert_times),
-            "fp_per_10k": (len(alert_times) / max(total_steps, 1)) * 10_000,
+            "fp_count": fp_count,
+            "fp_per_10k": (fp_count / max(total_steps, 1)) * 10_000,
             "lead_times": [],
             "lead_time_median_steps": float("nan"),
             "lead_time_iqr_steps": float("nan"),
         }
 
-    # Compute max lead timedelta if bounded
     if max_lead_steps is not None and freq_seconds is not None:
         max_lead_td = pd.Timedelta(seconds=max_lead_steps * freq_seconds)
     else:
         max_lead_td = None
 
-    # For each incident, find earliest alert within valid window
-    detected = [False] * n_incidents
-    lead_times: list[float] = []  # in steps
-    matched_alerts: set[int] = set()
+    n_detected = 0
+    fp_count = 0
+    lead_times: list[float] = []
 
-    for j, (inc_start, inc_end) in enumerate(incident_intervals):
-        # Detection window
-        window_start = (
-            inc_start - max_lead_td if max_lead_td is not None else pd.Timestamp.min
-        )
+    for sid, intervals in incidents_dict.items():
+        alert_times = alert_times_dict.get(sid, [])
+        detected = [False] * len(intervals)
+        matched_alerts: set[int] = set()
 
-        for i, at in enumerate(alert_times):
-            if i in matched_alerts:
-                continue
-            if window_start <= at < inc_start:
-                detected[j] = True
-                lead_s = (inc_start - at).total_seconds()
-                if freq_seconds and freq_seconds > 0:
-                    lead_steps = lead_s / freq_seconds
-                else:
-                    lead_steps = lead_s  # fallback: raw seconds
-                lead_times.append(lead_steps)
-                matched_alerts.add(i)
-                break  # first match per incident is enough
+        for j, (inc_start, inc_end) in enumerate(intervals):
+            window_start = (
+                inc_start - max_lead_td if max_lead_td is not None else pd.Timestamp.min
+            )
 
-    n_detected = sum(detected)
-    fp_count = len(alert_times) - len(matched_alerts)
+            for i, at in enumerate(alert_times):
+                if i in matched_alerts:
+                    continue
+                if window_start <= at < inc_start:
+                    detected[j] = True
+                    lead_s = (inc_start - at).total_seconds()
+                    lead_steps = lead_s / freq_seconds if (freq_seconds and freq_seconds > 0) else lead_s
+                    lead_times.append(lead_steps)
+                    matched_alerts.add(i)
+                    break
 
-    # Lead time stats (in steps)
+        n_detected += sum(detected)
+        fp_count += len(alert_times) - len(matched_alerts)
+
     if lead_times:
         lt_arr = np.array(lead_times)
         lt_median = float(np.median(lt_arr))

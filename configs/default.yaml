@@ -9,9 +9,12 @@ dataset:
   # NAB-specific options
   nab:
     data_dir: "data/nab"                # local directory for NAB data
-    nab_file: "realKnownCause/ambient_temperature_system_failure.csv"  # default single file
-    subset: "realKnownCause"            # subdirectory under NAB/data/ (legacy multiple file fallback)
-    files: null                         # null = all files in subset (legacy)
+    subset: "realAWSCloudwatch"         # subdirectory under NAB/data/
+    files:
+      - "rds_cpu_utilization_cc0c53.csv"
+      - "grok_asg_anomaly.csv"
+      - "ec2_disk_write_bytes_c0d644.csv"
+      - "ec2_cpu_utilization_24ae8d.csv"
     auto_download: true                 # download NAB zip if not present
 
   # Synthetic fallback options

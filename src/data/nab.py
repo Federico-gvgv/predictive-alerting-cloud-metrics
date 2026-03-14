@@ -121,6 +121,7 @@ def _load_single_csv(
     windows = all_windows.get(label_key, [])
     df["is_incident"] = _mark_incidents(df, windows)
     df = df.sort_values("timestamp").reset_index(drop=True)
+    df["series_id"] = label_key
     return df
 
 
@@ -214,7 +215,6 @@ def load_nab(cfg: dict[str, Any]) -> pd.DataFrame:
 
         result = (
             pd.concat(frames, ignore_index=True)
-            .sort_values("timestamp")
             .reset_index(drop=True)
         )
 

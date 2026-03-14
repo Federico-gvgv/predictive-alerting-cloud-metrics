@@ -49,7 +49,8 @@ def apply_cooldown(alerts: np.ndarray, cooldown: int) -> np.ndarray:
 def _run_threshold(
     scores: np.ndarray,
     timestamps: pd.DatetimeIndex,
-    incident_intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
+    series_ids: np.ndarray,
+    incident_intervals_dict: dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]],
     threshold: float,
     cooldown: int,
     total_steps: int,
@@ -58,11 +59,17 @@ def _run_threshold(
 ) -> dict:
     """Evaluate a single threshold and return event metrics."""
     raw_alerts = scores >= threshold
-    if cooldown > 0:
-        raw_alerts = apply_cooldown(raw_alerts, cooldown)
-    alert_times = [timestamps[i] for i in range(len(raw_alerts)) if raw_alerts[i]]
+    alert_times_dict = {}
+    for sid in np.unique(series_ids):
+        mask = (series_ids == sid)
+        sid_alerts = raw_alerts[mask]
+        if cooldown > 0:
+            sid_alerts = apply_cooldown(sid_alerts, cooldown)
+        sid_ts = timestamps[mask]
+        alert_times_dict[sid] = [sid_ts[i] for i in range(len(sid_alerts)) if sid_alerts[i]]
+
     return event_metrics(
-        alert_times, incident_intervals, total_steps,
+        alert_times_dict, incident_intervals_dict, total_steps,
         max_lead_steps=max_lead_steps, freq_seconds=freq_seconds,
     )
 
@@ -70,7 +77,8 @@ def _run_threshold(
 def select_threshold(
     scores: np.ndarray,
     timestamps: pd.DatetimeIndex,
-    incident_intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
+    series_ids: np.ndarray,
+    incident_intervals_dict: dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]],
     cooldown: int = 10,
     total_steps: int = 0,
     target_recall: float = 0.8,
@@ -114,7 +122,7 @@ def select_threshold(
 
     for th in candidates:
         result = _run_threshold(
-            scores, timestamps, incident_intervals, th, cooldown, total_steps,
+            scores, timestamps, series_ids, incident_intervals_dict, th, cooldown, total_steps,
             max_lead_steps=max_lead_steps, freq_seconds=freq_seconds,
         )
         sweep.append({

@@ -42,7 +42,7 @@ python -m src.train --config configs/default.yaml    # or: make train
 python -m src.eval --config configs/default.yaml     # or: make eval
 
 # Run tests
-pytest tests/ -v                         # or: make test
+python -m pytest -q                      # or: make test
 ```
 
 To train the **TCN** instead:
@@ -79,16 +79,15 @@ The [Numenta Anomaly Benchmark](https://github.com/numenta/NAB) is the primary
 data source. NAB is **not vendored** — it is downloaded at runtime via
 `scripts/download_nab.py`.
 
-**Default series (single-service setup):**
+**Default series (multi-service setup):**
+We use a small collection of real AWS Cloudwatch streams by default to provide a better mix of anomalies in train/val/test splits:
 
-- `realKnownCause/ambient_temperature_system_failure.csv`
+- `realAWSCloudwatch/rds_cpu_utilization_cc0c53.csv`
+- `realAWSCloudwatch/grok_asg_anomaly.csv`
+- `realAWSCloudwatch/ec2_disk_write_bytes_c0d644.csv`
+- `realAWSCloudwatch/ec2_cpu_utilization_24ae8d.csv`
 
-This keeps the project simple and avoids accidental mixing of independent time
-series (which would invalidate sliding windows).
-
-**Optional extension (multi-series):**
-If enabled in config, each CSV is treated as a separate `series_id` and windows
-are created **within** a series (never across series boundaries).
+To prevent cross-service contamination (e.g. windows spanning data from an EC2 instance to an RDS instance), all window extracting, labeling, and continuous data-splits strictly respect **series boundaries**. Note that event metrics are aggregated *across* all series during evaluation, which reduces the high variance usually seen on datasets with very few incidents.
 
 ### Synthetic fallback
 

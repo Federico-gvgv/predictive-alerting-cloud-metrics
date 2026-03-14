@@ -14,7 +14,7 @@ eval:
 	python -m src.eval --config configs/default.yaml
 
 test:
-	pytest tests/ -v
+	python -m pytest -q tests/
 
 clean:
 	rm -rf outputs/ __pycache__ .pytest_cache

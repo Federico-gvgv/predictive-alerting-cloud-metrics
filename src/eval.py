@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pdnp
 import pandas as pd
 
 from src.data import load_dataset
@@ -23,7 +24,7 @@ from src.data.splits import time_split
 from src.data.windowing import create_windows
 from src.evaluation.metrics import (
     event_metrics,
-    extract_incident_intervals,
+    extract_incidents_per_series,
     pointwise_metrics,
 )
 from src.evaluation.plots import (
@@ -64,7 +65,8 @@ def _load_model(run_dir: Path, cfg: dict):
 def _compute_event_results(
     scores: np.ndarray,
     timestamps: pd.DatetimeIndex,
-    incident_intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
+    series_ids: np.ndarray,
+    incident_intervals_dict: dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]],
     threshold: float,
     cooldown: int,
     total_steps: int,
@@ -75,14 +77,17 @@ def _compute_event_results(
 ) -> dict:
     """Compute event metrics with a given cooldown and log them."""
     raw_alerts = scores >= threshold
-    if cooldown > 0:
-        alerts = apply_cooldown(raw_alerts, cooldown)
-    else:
-        alerts = raw_alerts
+    alert_times_dict = {}
+    for sid in np.unique(series_ids):
+        mask = (series_ids == sid)
+        sid_alerts = raw_alerts[mask]
+        if cooldown > 0:
+            sid_alerts = apply_cooldown(sid_alerts, cooldown)
+        sid_ts = timestamps[mask]
+        alert_times_dict[sid] = [sid_ts[i] for i in range(len(sid_alerts)) if sid_alerts[i]]
 
-    alert_times = [timestamps[i] for i in range(len(alerts)) if alerts[i]]
     result = event_metrics(
-        alert_times, incident_intervals, total_steps,
+        alert_times_dict, incident_intervals_dict, total_steps,
         max_lead_steps=max_lead_steps, freq_seconds=freq_seconds,
     )
 
@@ -131,27 +136,38 @@ def main(argv: list[str] | None = None) -> None:
     # ── 1. Load dataset & windows ────────────────────────────────────
     df = load_dataset(cfg)
     logger.info("Raw dataset: %d rows.", len(df))
-    freq_seconds = df["timestamp"].diff().median().total_seconds()
+    if "series_id" in df.columns:
+        freq_seconds = df.groupby("series_id")["timestamp"].diff().median().total_seconds()
+    else:
+        freq_seconds = df["timestamp"].diff().median().total_seconds()
 
     W = cfg["windowing"]["W"]
     H = cfg["windowing"]["H"]
     stride = cfg["windowing"].get("stride", 1)
 
-    X, y, timestamps = create_windows(df, W=W, H=H, stride=stride)
+    X, y, timestamps, series_ids = create_windows(df, W=W, H=H, stride=stride)
 
     split_cfg = cfg.get("split", {})
     splits = time_split(
         X,
         y,
         timestamps,
+        series_ids,
         train_ratio=split_cfg.get("train_ratio", 0.7),
         val_ratio=split_cfg.get("val_ratio", 0.15),
         test_ratio=split_cfg.get("test_ratio", 0.15),
     )
 
-    test_X, test_y, test_ts = splits["test"]
-    logger.info("Test split: %d windows, incident rate %.2f%%.",
-                len(test_y), test_y.mean() * 100)
+    for name, (sx, sy, st, ssid) in splits.items():
+        n_pos = int(sy.sum()) if len(sy) else 0
+        logger.info(
+            "  %-5s split: %6d windows, %5d positive (%.2f%%)",
+            name,
+            len(sy),
+            n_pos,
+            (n_pos / len(sy) * 100) if len(sy) else 0.0,
+        )
+    test_X, test_y, test_ts, test_sid = splits["test"]
 
     # ── 2. Load trained model ────────────────────────────────────────
     model_choice = cfg["model"]["model_choice"]
@@ -185,29 +201,31 @@ def main(argv: list[str] | None = None) -> None:
         logger.info("  %-24s %.4f", k, v)
 
     # ── 6. Event-level metrics ───────────────────────────────────────
-    test_intervals = extract_incident_intervals(
-        df,
-        start_ts=pd.Timestamp(test_ts.min()),
-        end_ts=pd.Timestamp(test_ts.max()),
-    )
-    logger.info("Test incident intervals: %d.", len(test_intervals))
+    test_bounds = {}
+    for sid in np.unique(test_sid):
+        mask = test_sid == sid
+        test_bounds[sid] = (pd.Timestamp(test_ts[mask].min()), pd.Timestamp(test_ts[mask].max()))
+
+    test_intervals_dict = extract_incidents_per_series(df, bounds_per_series=test_bounds)
+    n_test_incidents = sum(len(v) for v in test_intervals_dict.values())
+    logger.info("Test incident intervals: %d.", n_test_incidents)
 
     # With cooldown
     ev_cd = _compute_event_results(
-        scores, test_ts, test_intervals, threshold, cooldown,
+        scores, test_ts, test_sid, test_intervals_dict, threshold, cooldown,
         len(test_y), f"cooldown={cooldown}", logger,
         max_lead_steps=H, freq_seconds=freq_seconds,
     )
     # Without cooldown
     ev_nocd = _compute_event_results(
-        scores, test_ts, test_intervals, threshold, 0,
+        scores, test_ts, test_sid, test_intervals_dict, threshold, 0,
         len(test_y), "no cooldown", logger,
         max_lead_steps=H, freq_seconds=freq_seconds,
     )
 
     # ── 7. Threshold sweep on test (for plotting only) ───────────────
     _, test_sweep = select_threshold(
-        scores, test_ts, test_intervals,
+        scores, test_ts, test_sid, test_intervals_dict,
         cooldown=cooldown, total_steps=len(test_y),
         target_recall=eval_cfg.get("target_event_recall", 0.8),
         max_lead_steps=H, freq_seconds=freq_seconds,
@@ -220,10 +238,16 @@ def main(argv: list[str] | None = None) -> None:
     plot_pr_curve(test_y, scores, plot_dir / "pr_curve.png")
 
     # Lead times (recompute with raw lead times)
-    raw_alerts = apply_cooldown(scores >= threshold, cooldown)
-    alert_times = [test_ts[i] for i in range(len(raw_alerts)) if raw_alerts[i]]
+    raw_alerts = scores >= threshold
+    alert_times_dict = {}
+    for sid in np.unique(test_sid):
+        mask = test_sid == sid
+        sid_alerts = apply_cooldown(raw_alerts[mask], cooldown)
+        sid_ts = test_ts[mask]
+        alert_times_dict[sid] = [sid_ts[i] for i in range(len(sid_alerts)) if sid_alerts[i]]
+
     ev_full = event_metrics(
-        alert_times, test_intervals, len(test_y),
+        alert_times_dict, test_intervals_dict, len(test_y),
         max_lead_steps=H, freq_seconds=freq_seconds,
     )
     plot_lead_time_histogram(ev_full["lead_times"], plot_dir / "lead_time.png")
@@ -237,7 +261,7 @@ def main(argv: list[str] | None = None) -> None:
         "cooldown": cooldown,
         "n_test": int(len(test_y)),
         "n_positive": int(test_y.sum()),
-        "n_test_incidents": len(test_intervals),
+        "n_test_incidents": n_test_incidents,
         "pointwise": pw,
         "event_with_cooldown": ev_cd,
         "event_without_cooldown": ev_nocd,

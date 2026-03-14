@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.evaluation.metrics import event_metrics, extract_incident_intervals
+from src.evaluation.metrics import event_metrics, extract_incidents_per_series
 from src.evaluation.thresholding import apply_cooldown
 
 
@@ -70,25 +70,28 @@ class TestIntervalExtraction:
             "timestamp": pd.date_range("2024-01-01", periods=10, freq="5min"),
             "is_incident": [False, False, True, True, True, False, False, False, False, False],
         })
-        intervals = extract_incident_intervals(df)
-        assert len(intervals) == 1
-        assert intervals[0][0] == df["timestamp"].iloc[2]
-        assert intervals[0][1] == df["timestamp"].iloc[4]
+        df["series_id"] = "A"
+        intervals = extract_incidents_per_series(df)
+        assert len(intervals["A"]) == 1
+        assert intervals["A"][0][0] == df["timestamp"].iloc[2]
+        assert intervals["A"][0][1] == df["timestamp"].iloc[4]
 
     def test_two_intervals(self):
         df = pd.DataFrame({
             "timestamp": pd.date_range("2024-01-01", periods=10, freq="5min"),
             "is_incident": [True, True, False, False, True, True, True, False, False, False],
         })
-        intervals = extract_incident_intervals(df)
-        assert len(intervals) == 2
+        df["series_id"] = "A"
+        intervals = extract_incidents_per_series(df)
+        assert len(intervals["A"]) == 2
 
     def test_no_incidents(self):
         df = pd.DataFrame({
             "timestamp": pd.date_range("2024-01-01", periods=5, freq="5min"),
             "is_incident": [False] * 5,
         })
-        assert extract_incident_intervals(df) == []
+        df["series_id"] = "A"
+        assert extract_incidents_per_series(df)["A"] == []
 
     def test_time_boundary_filtering(self):
         """Only intervals within [start_ts, end_ts] should be returned."""
@@ -96,10 +99,11 @@ class TestIntervalExtraction:
             "timestamp": pd.date_range("2024-01-01", periods=20, freq="5min"),
             "is_incident": [True, True, False] * 6 + [False, False],
         })
-        all_intervals = extract_incident_intervals(df)
+        df["series_id"] = "A"
+        all_intervals = extract_incidents_per_series(df)["A"]
         # Filter to first 10 rows
         mid_ts = df["timestamp"].iloc[9]
-        filtered = extract_incident_intervals(df, end_ts=mid_ts)
+        filtered = extract_incidents_per_series(df, bounds_per_series={"A": (df["timestamp"].iloc[0], mid_ts)})["A"]
         assert len(filtered) <= len(all_intervals)
 
 
@@ -112,9 +116,9 @@ class TestEventMetrics:
     def test_perfect_detection(self):
         """One alert before each incident → event recall = 1.0."""
         # Incidents at minutes 100-110 and 200-210
-        intervals = _intervals([(100, 110), (200, 210)])
+        intervals = {"A": _intervals([(100, 110), (200, 210)])}
         # Alerts at minutes 90 and 190 (before each incident)
-        alert_times = _ts([90, 190])
+        alert_times = {"A": _ts([90, 190])}
 
         result = event_metrics(alert_times, intervals, total_steps=1000)
         assert result["event_recall"] == 1.0
@@ -123,8 +127,8 @@ class TestEventMetrics:
 
     def test_missed_incident(self):
         """Alert only before first incident → event recall = 0.5."""
-        intervals = _intervals([(100, 110), (200, 210)])
-        alert_times = _ts([90])  # only before first
+        intervals = {"A": _intervals([(100, 110), (200, 210)])}
+        alert_times = {"A": _ts([90])}  # only before first
 
         result = event_metrics(alert_times, intervals, total_steps=1000)
         assert result["event_recall"] == 0.5
@@ -132,17 +136,17 @@ class TestEventMetrics:
 
     def test_no_alerts(self):
         """No alerts at all → event recall = 0."""
-        intervals = _intervals([(100, 110)])
-        result = event_metrics([], intervals, total_steps=1000)
+        intervals = {"A": _intervals([(100, 110)])}
+        result = event_metrics({}, intervals, total_steps=1000)
         assert result["event_recall"] == 0.0
         assert result["n_detected"] == 0
 
     def test_false_positives(self):
         """Alerts not matched to any incident → counted as FP."""
-        intervals = _intervals([(100, 110)])
+        intervals = {"A": _intervals([(100, 110)])}
         # Alert at 90 (matched), 50 (FP — before incident but consumed by first match),
         # actually: alert at 50 fires first, matches incident. alert at 500 is FP.
-        alert_times = _ts([90, 500])
+        alert_times = {"A": _ts([90, 500])}
 
         result = event_metrics(alert_times, intervals, total_steps=1000)
         assert result["n_detected"] == 1
@@ -151,8 +155,8 @@ class TestEventMetrics:
 
     def test_lead_time_computation(self):
         """Lead time = incident_start - alert_time."""
-        intervals = _intervals([(100, 110)])
-        alert_times = _ts([80])  # 20 min before incident start
+        intervals = {"A": _intervals([(100, 110)])}
+        alert_times = {"A": _ts([80])}  # 20 min before incident start
 
         result = event_metrics(alert_times, intervals, total_steps=1000)
         assert result["n_detected"] == 1
@@ -162,8 +166,8 @@ class TestEventMetrics:
 
     def test_bounded_lead_time(self):
         """Alerts too early should not count as detection if max_lead_steps is set."""
-        intervals = _intervals([(100, 110)])
-        alert_times = _ts([50])  # Alert 50 min before incident
+        intervals = {"A": _intervals([(100, 110)])}
+        alert_times = {"A": _ts([50])}  # Alert 50 min before incident
 
         # Unbounded (legacy behavior) -> it is a detection
         res_unbounded = event_metrics(alert_times, intervals, total_steps=1000)
@@ -180,8 +184,8 @@ class TestEventMetrics:
 
     def test_bounded_lead_time_detected(self):
         """Alerts within the boundary should count."""
-        intervals = _intervals([(100, 110)])
-        alert_times = _ts([80])  # Alert 20 min before incident
+        intervals = {"A": _intervals([(100, 110)])}
+        alert_times = {"A": _ts([80])}  # Alert 20 min before incident
 
         # Bounded with H=30 steps, freq=1 min (60s). Max lead time = 30 min.
         # Alert is 20 min before, which is <= 30 min -> valid detection.
@@ -195,16 +199,28 @@ class TestEventMetrics:
 
     def test_no_incidents(self):
         """No incident intervals → event recall is NaN, all alerts are FP."""
-        alert_times = _ts([10, 20, 30])
-        result = event_metrics(alert_times, [], total_steps=1000)
+        alert_times = {"A": _ts([10, 20, 30])}
+        result = event_metrics(alert_times, {}, total_steps=1000)
         assert np.isnan(result["event_recall"])
         assert result["fp_count"] == 3
 
     def test_alert_during_incident_not_before(self):
         """Alert at incident start or after should NOT count as detection."""
-        intervals = _intervals([(100, 110)])
-        alert_times = _ts([100])  # at start, not before
+        intervals = {"A": _intervals([(100, 110)])}
+        alert_times = {"A": _ts([100])}  # at start, not before
 
         result = event_metrics(alert_times, intervals, total_steps=1000)
         assert result["n_detected"] == 0
         assert result["fp_count"] == 1
+
+    def test_multi_series_metrics(self):
+        """Alerts in series A should not detect incidents in series B."""
+        intervals = {"A": _intervals([(100, 110)]), "B": _intervals([(200, 210)])}
+        # series A has an alert *before* B's incident, but it's in series A!
+        alert_times = {"A": _ts([90, 190]), "B": []}
+
+        result = event_metrics(alert_times, intervals, total_steps=2000)
+        # B's incident is missed. A's incident is detected.
+        assert result["event_recall"] == 0.5
+        assert result["n_detected"] == 1
+        assert result["fp_count"] == 1  # the alert at 190 in A is a false positive
