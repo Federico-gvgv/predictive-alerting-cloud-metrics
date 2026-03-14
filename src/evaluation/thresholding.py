@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.evaluation.metrics import event_metrics, extract_incident_intervals
+from src.evaluation.metrics import event_metrics
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -117,8 +117,12 @@ def select_threshold(
             "n_detected": result["n_detected"],
         })
 
-    # Filter candidates that meet target recall
-    meeting = [s for s in sweep if s["event_recall"] >= target_recall]
+    # Filter candidates that meet target recall (treat NaN as 0)
+    def _recall(s: dict) -> float:
+        r = s["event_recall"]
+        return r if r == r else 0.0  # NaN-safe
+
+    meeting = [s for s in sweep if _recall(s) >= target_recall]
 
     if meeting:
         best = min(meeting, key=lambda s: s["fp_count"])
@@ -130,7 +134,7 @@ def select_threshold(
             best["fp_per_10k"],
         )
     else:
-        best = max(sweep, key=lambda s: s["event_recall"])
+        best = max(sweep, key=lambda s: _recall(s))
         logger.warning(
             "No threshold reaches %.0f%% event recall. "
             "Best: threshold=%.3f (event_recall=%.2f, fp/10k=%.1f).",

@@ -97,7 +97,7 @@ def plot_threshold_sweep(
         return
 
     thresholds = [s["threshold"] for s in sweep]
-    recalls = [s["event_recall"] for s in sweep]
+    recalls = [r if r == r else 0.0 for r in (s["event_recall"] for s in sweep)]
     fps = [s["fp_per_10k"] for s in sweep]
 
     fig, ax1 = plt.subplots(figsize=(7, 4.5))
