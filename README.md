@@ -1,7 +1,5 @@
 # Predictive Alerting for Cloud Metrics
 
-> **JetBrains Internship – Task #1**
-
 An early-warning system that learns temporal patterns in cloud-infrastructure
 metrics and fires alerts **before** an incident window starts, giving operators
 time to react.
