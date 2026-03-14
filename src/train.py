@@ -5,7 +5,8 @@ Usage::
     python -m src.train --config configs/default.yaml
 
 Loads the dataset, builds sliding windows, splits, trains the selected
-model, and saves artifacts to the output directory.
+model, selects an alert threshold on the validation set, and saves
+artifacts to the output directory.
 """
 
 from __future__ import annotations
@@ -15,9 +16,13 @@ import json
 import shutil
 from pathlib import Path
 
+import pandas as pd
+
 from src.data import load_dataset
 from src.data.splits import time_split
 from src.data.windowing import create_windows
+from src.evaluation.metrics import extract_incident_intervals
+from src.evaluation.thresholding import select_threshold
 from src.models import get_model
 from src.utils.config import load_config, pretty_print_config
 from src.utils.logging import get_logger, set_seed
@@ -86,7 +91,7 @@ def main(argv: list[str] | None = None) -> None:
 
     model = get_model(cfg)
     X_train, y_train, _ = splits["train"]
-    X_val, y_val, _ = splits["val"]
+    X_val, y_val, ts_val = splits["val"]
     model.fit(X_train, y_train, X_val, y_val)
 
     # ── 5. Save artifacts ────────────────────────────────────────────
@@ -101,6 +106,41 @@ def main(argv: list[str] | None = None) -> None:
     # Save a copy of the config for reproducibility
     config_out = run_dir / "config.json"
     config_out.write_text(json.dumps(cfg, indent=2, default=str), encoding="utf-8")
+
+    # ── 6. Threshold selection on validation set ─────────────────────
+    eval_cfg = cfg.get("evaluation", {})
+    cooldown = eval_cfg.get("cooldown", 10)
+    target_recall = eval_cfg.get("target_event_recall", 0.8)
+
+    logger.info("Selecting alert threshold on validation set …")
+    val_scores = model.predict_proba(X_val)
+
+    val_intervals = extract_incident_intervals(
+        df,
+        start_ts=pd.Timestamp(ts_val.min()),
+        end_ts=pd.Timestamp(ts_val.max()),
+    )
+    logger.info("  Validation incidents: %d intervals.", len(val_intervals))
+
+    best_threshold, sweep = select_threshold(
+        val_scores,
+        ts_val,
+        val_intervals,
+        cooldown=cooldown,
+        total_steps=len(y_val),
+        target_recall=target_recall,
+    )
+
+    threshold_info = {
+        "threshold": best_threshold,
+        "target_event_recall": target_recall,
+        "cooldown": cooldown,
+        "n_val_incidents": len(val_intervals),
+    }
+    (run_dir / "threshold.json").write_text(
+        json.dumps(threshold_info, indent=2), encoding="utf-8"
+    )
+    logger.info("Selected threshold: %.3f → saved to %s.", best_threshold, run_dir / "threshold.json")
 
     logger.info("Artifacts saved to %s.", run_dir)
     logger.info("Training complete.")

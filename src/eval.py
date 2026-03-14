@@ -4,8 +4,9 @@ Usage::
 
     python -m src.eval --config configs/default.yaml
 
-Loads the dataset, builds windows, loads the trained model from the
-outputs directory, computes metrics, and saves a JSON evaluation report.
+Loads the dataset, builds windows, loads the trained model and selected
+threshold, computes pointwise + event-level alerting metrics, generates
+plots, and saves a comprehensive JSON report.
 """
 
 from __future__ import annotations
@@ -15,17 +16,22 @@ import json
 from pathlib import Path
 
 import numpy as np
-from sklearn.metrics import (
-    average_precision_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
+import pandas as pd
 
 from src.data import load_dataset
 from src.data.splits import time_split
 from src.data.windowing import create_windows
+from src.evaluation.metrics import (
+    event_metrics,
+    extract_incident_intervals,
+    pointwise_metrics,
+)
+from src.evaluation.plots import (
+    plot_lead_time_histogram,
+    plot_pr_curve,
+    plot_threshold_sweep,
+)
+from src.evaluation.thresholding import apply_cooldown, select_threshold
 from src.utils.config import load_config, pretty_print_config
 from src.utils.logging import get_logger, set_seed
 
@@ -53,6 +59,41 @@ def _load_model(run_dir: Path, cfg: dict):
         return TCNModel.load(run_dir, cfg)
 
     raise ValueError(f"Unknown model_type '{model_type}' in {meta_path}.")
+
+
+def _compute_event_results(
+    scores: np.ndarray,
+    timestamps: pd.DatetimeIndex,
+    incident_intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
+    threshold: float,
+    cooldown: int,
+    total_steps: int,
+    label: str,
+    logger,
+) -> dict:
+    """Compute event metrics with a given cooldown and log them."""
+    raw_alerts = scores >= threshold
+    if cooldown > 0:
+        alerts = apply_cooldown(raw_alerts, cooldown)
+    else:
+        alerts = raw_alerts
+
+    alert_times = [timestamps[i] for i in range(len(alerts)) if alerts[i]]
+    result = event_metrics(alert_times, incident_intervals, total_steps)
+
+    logger.info("── Event Metrics (%s) ──", label)
+    logger.info("  %-28s %.4f", "event_recall", result["event_recall"])
+    logger.info("  %-28s %d / %d", "detected / incidents",
+                result["n_detected"], result["n_incidents"])
+    logger.info("  %-28s %d", "fp_count", result["fp_count"])
+    logger.info("  %-28s %.2f", "fp_per_10k", result["fp_per_10k"])
+    logger.info("  %-28s %.1f s", "lead_time_median",
+                result["lead_time_median_s"])
+    logger.info("  %-28s %.1f s", "lead_time_iqr",
+                result["lead_time_iqr_s"])
+
+    # Strip raw lead_times list for JSON (keep summary stats)
+    return {k: v for k, v in result.items() if k != "lead_times"}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -114,52 +155,86 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("Loading model from %s …", run_dir)
     model = _load_model(run_dir, cfg)
 
-    # ── 3. Predict ───────────────────────────────────────────────────
+    # ── 3. Load threshold ────────────────────────────────────────────
+    eval_cfg = cfg.get("evaluation", {})
+    cooldown = eval_cfg.get("cooldown", 10)
+
+    threshold_path = run_dir / "threshold.json"
+    if threshold_path.is_file():
+        thr_info = json.loads(threshold_path.read_text(encoding="utf-8"))
+        threshold = thr_info["threshold"]
+        logger.info("Loaded selected threshold: %.3f (from %s).", threshold, threshold_path)
+    else:
+        threshold = eval_cfg.get("alert_threshold", 0.5)
+        logger.info("No threshold.json found – using config default: %.3f.", threshold)
+
+    # ── 4. Predict ───────────────────────────────────────────────────
     scores = model.predict_proba(test_X)
 
-    # ── 4. Compute metrics ───────────────────────────────────────────
-    eval_cfg = cfg.get("evaluation", {})
-    threshold = eval_cfg.get("alert_threshold", 0.5)
+    # ── 5. Pointwise metrics ─────────────────────────────────────────
+    pw = pointwise_metrics(test_y, scores, threshold)
 
-    preds = (scores >= threshold).astype(int)
+    logger.info("── Pointwise Metrics ──")
+    for k, v in pw.items():
+        logger.info("  %-24s %.4f", k, v)
 
-    results: dict[str, float] = {}
+    # ── 6. Event-level metrics ───────────────────────────────────────
+    test_intervals = extract_incident_intervals(
+        df,
+        start_ts=pd.Timestamp(test_ts.min()),
+        end_ts=pd.Timestamp(test_ts.max()),
+    )
+    logger.info("Test incident intervals: %d.", len(test_intervals))
 
-    # ROC-AUC & PR-AUC (require both classes present)
-    if len(np.unique(test_y)) > 1:
-        results["roc_auc"] = float(roc_auc_score(test_y, scores))
-        results["pr_auc"] = float(average_precision_score(test_y, scores))
-    else:
-        logger.warning("Only one class in test set – AUC metrics undefined.")
-        results["roc_auc"] = float("nan")
-        results["pr_auc"] = float("nan")
+    # With cooldown
+    ev_cd = _compute_event_results(
+        scores, test_ts, test_intervals, threshold, cooldown,
+        len(test_y), f"cooldown={cooldown}", logger,
+    )
+    # Without cooldown
+    ev_nocd = _compute_event_results(
+        scores, test_ts, test_intervals, threshold, 0,
+        len(test_y), "no cooldown", logger,
+    )
 
-    results["precision"] = float(precision_score(test_y, preds, zero_division=0))
-    results["recall"] = float(recall_score(test_y, preds, zero_division=0))
-    results["f1"] = float(f1_score(test_y, preds, zero_division=0))
-    results["threshold"] = threshold
-    results["n_test"] = int(len(test_y))
-    results["n_positive"] = int(test_y.sum())
-    results["n_predicted_positive"] = int(preds.sum())
+    # ── 7. Threshold sweep on test (for plotting only) ───────────────
+    _, test_sweep = select_threshold(
+        scores, test_ts, test_intervals,
+        cooldown=cooldown, total_steps=len(test_y),
+        target_recall=eval_cfg.get("target_event_recall", 0.8),
+    )
 
-    logger.info("── Evaluation Results ──")
-    for k, v in results.items():
-        if isinstance(v, float):
-            logger.info("  %-24s %.4f", k, v)
-        else:
-            logger.info("  %-24s %s", k, v)
+    # ── 8. Plots ─────────────────────────────────────────────────────
+    plot_dir = output_dir / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── 5. Save report ───────────────────────────────────────────────
+    plot_pr_curve(test_y, scores, plot_dir / "pr_curve.png")
+
+    # Lead times (recompute with raw lead times)
+    raw_alerts = apply_cooldown(scores >= threshold, cooldown)
+    alert_times = [test_ts[i] for i in range(len(raw_alerts)) if raw_alerts[i]]
+    ev_full = event_metrics(alert_times, test_intervals, len(test_y))
+    plot_lead_time_histogram(ev_full["lead_times"], plot_dir / "lead_time.png")
+
+    plot_threshold_sweep(test_sweep, plot_dir / "threshold_sweep.png")
+
+    # ── 9. Save report ───────────────────────────────────────────────
+    report = {
+        "model": model_choice,
+        "threshold": threshold,
+        "cooldown": cooldown,
+        "n_test": int(len(test_y)),
+        "n_positive": int(test_y.sum()),
+        "n_test_incidents": len(test_intervals),
+        "pointwise": pw,
+        "event_with_cooldown": ev_cd,
+        "event_without_cooldown": ev_nocd,
+    }
+
     report_path = run_dir / "eval_report.json"
-    report_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
-    logger.info("Evaluation report saved to %s.", report_path)
-
-    # ------------------------------------------------------------------
-    # TODO – event-style metrics:
-    #   - Apply cooldown logic to predicted alerts
-    #   - Match predicted alert events to ground-truth incident intervals
-    #   - Compute event-level precision / recall / F1
-    # ------------------------------------------------------------------
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    logger.info("Full evaluation report saved to %s.", report_path)
+    logger.info("Plots saved to %s.", plot_dir)
     logger.info("Evaluation complete.")
 
 

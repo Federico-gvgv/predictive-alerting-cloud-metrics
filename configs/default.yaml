@@ -46,8 +46,9 @@ training:
 
 # ---- Evaluation -------------------------------------------------------------
 evaluation:
-  alert_threshold: 0.5                  # probability threshold for binary alerts
+  alert_threshold: 0.5                  # fallback if no threshold.json exists
   cooldown: 10                          # minimum steps between consecutive alerts
+  target_event_recall: 0.8              # target for threshold selection on val set
   metrics:
     - "roc_auc"
     - "pr_auc"
