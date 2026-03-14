@@ -53,13 +53,18 @@ def _run_threshold(
     threshold: float,
     cooldown: int,
     total_steps: int,
+    max_lead_steps: int | None = None,
+    freq_seconds: float | None = None,
 ) -> dict:
     """Evaluate a single threshold and return event metrics."""
     raw_alerts = scores >= threshold
     if cooldown > 0:
         raw_alerts = apply_cooldown(raw_alerts, cooldown)
     alert_times = [timestamps[i] for i in range(len(raw_alerts)) if raw_alerts[i]]
-    return event_metrics(alert_times, incident_intervals, total_steps)
+    return event_metrics(
+        alert_times, incident_intervals, total_steps,
+        max_lead_steps=max_lead_steps, freq_seconds=freq_seconds,
+    )
 
 
 def select_threshold(
@@ -70,6 +75,8 @@ def select_threshold(
     total_steps: int = 0,
     target_recall: float = 0.8,
     n_candidates: int = 100,
+    max_lead_steps: int | None = None,
+    freq_seconds: float | None = None,
 ) -> tuple[float, list[dict]]:
     """Sweep thresholds and pick the one targeting *target_recall*.
 
@@ -107,7 +114,8 @@ def select_threshold(
 
     for th in candidates:
         result = _run_threshold(
-            scores, timestamps, incident_intervals, th, cooldown, total_steps
+            scores, timestamps, incident_intervals, th, cooldown, total_steps,
+            max_lead_steps=max_lead_steps, freq_seconds=freq_seconds,
         )
         sweep.append({
             "threshold": float(th),

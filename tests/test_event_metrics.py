@@ -156,8 +156,42 @@ class TestEventMetrics:
 
         result = event_metrics(alert_times, intervals, total_steps=1000)
         assert result["n_detected"] == 1
-        # Lead time should be 20 minutes = 1200 seconds
-        assert result["lead_time_median_s"] == 1200.0
+        # Without freq_seconds, lead_steps falls back to raw seconds
+        # 20 minutes = 1200 seconds
+        assert result["lead_time_median_steps"] == 1200.0
+
+    def test_bounded_lead_time(self):
+        """Alerts too early should not count as detection if max_lead_steps is set."""
+        intervals = _intervals([(100, 110)])
+        alert_times = _ts([50])  # Alert 50 min before incident
+
+        # Unbounded (legacy behavior) -> it is a detection
+        res_unbounded = event_metrics(alert_times, intervals, total_steps=1000)
+        assert res_unbounded["n_detected"] == 1
+
+        # Bounded with H=30 steps, freq=1 min (60s). Max lead time = 30 min.
+        # Alert is 50 min before, which is > 30 min -> missed incident, 1 FP.
+        res_bounded = event_metrics(
+            alert_times, intervals, total_steps=1000,
+            max_lead_steps=30, freq_seconds=60,
+        )
+        assert res_bounded["n_detected"] == 0
+        assert res_bounded["fp_count"] == 1
+
+    def test_bounded_lead_time_detected(self):
+        """Alerts within the boundary should count."""
+        intervals = _intervals([(100, 110)])
+        alert_times = _ts([80])  # Alert 20 min before incident
+
+        # Bounded with H=30 steps, freq=1 min (60s). Max lead time = 30 min.
+        # Alert is 20 min before, which is <= 30 min -> valid detection.
+        res_bounded = event_metrics(
+            alert_times, intervals, total_steps=1000,
+            max_lead_steps=30, freq_seconds=60,
+        )
+        assert res_bounded["n_detected"] == 1
+        assert res_bounded["fp_count"] == 0
+        assert res_bounded["lead_time_median_steps"] == 20.0  # 20 steps!
 
     def test_no_incidents(self):
         """No incident intervals → event recall is NaN, all alerts are FP."""

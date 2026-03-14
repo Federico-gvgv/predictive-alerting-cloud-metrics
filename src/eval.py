@@ -70,6 +70,8 @@ def _compute_event_results(
     total_steps: int,
     label: str,
     logger,
+    max_lead_steps: int | None = None,
+    freq_seconds: float | None = None,
 ) -> dict:
     """Compute event metrics with a given cooldown and log them."""
     raw_alerts = scores >= threshold
@@ -79,7 +81,10 @@ def _compute_event_results(
         alerts = raw_alerts
 
     alert_times = [timestamps[i] for i in range(len(alerts)) if alerts[i]]
-    result = event_metrics(alert_times, incident_intervals, total_steps)
+    result = event_metrics(
+        alert_times, incident_intervals, total_steps,
+        max_lead_steps=max_lead_steps, freq_seconds=freq_seconds,
+    )
 
     logger.info("── Event Metrics (%s) ──", label)
     logger.info("  %-28s %.4f", "event_recall", result["event_recall"])
@@ -87,10 +92,10 @@ def _compute_event_results(
                 result["n_detected"], result["n_incidents"])
     logger.info("  %-28s %d", "fp_count", result["fp_count"])
     logger.info("  %-28s %.2f", "fp_per_10k", result["fp_per_10k"])
-    logger.info("  %-28s %.1f s", "lead_time_median",
-                result["lead_time_median_s"])
-    logger.info("  %-28s %.1f s", "lead_time_iqr",
-                result["lead_time_iqr_s"])
+    logger.info("  %-28s %.1f steps", "lead_time_median",
+                result["lead_time_median_steps"])
+    logger.info("  %-28s %.1f steps", "lead_time_iqr",
+                result["lead_time_iqr_steps"])
 
     # Strip raw lead_times list for JSON (keep summary stats)
     return {k: v for k, v in result.items() if k != "lead_times"}
@@ -126,6 +131,7 @@ def main(argv: list[str] | None = None) -> None:
     # ── 1. Load dataset & windows ────────────────────────────────────
     df = load_dataset(cfg)
     logger.info("Raw dataset: %d rows.", len(df))
+    freq_seconds = df["timestamp"].diff().median().total_seconds()
 
     W = cfg["windowing"]["W"]
     H = cfg["windowing"]["H"]
@@ -190,11 +196,13 @@ def main(argv: list[str] | None = None) -> None:
     ev_cd = _compute_event_results(
         scores, test_ts, test_intervals, threshold, cooldown,
         len(test_y), f"cooldown={cooldown}", logger,
+        max_lead_steps=H, freq_seconds=freq_seconds,
     )
     # Without cooldown
     ev_nocd = _compute_event_results(
         scores, test_ts, test_intervals, threshold, 0,
         len(test_y), "no cooldown", logger,
+        max_lead_steps=H, freq_seconds=freq_seconds,
     )
 
     # ── 7. Threshold sweep on test (for plotting only) ───────────────
@@ -202,6 +210,7 @@ def main(argv: list[str] | None = None) -> None:
         scores, test_ts, test_intervals,
         cooldown=cooldown, total_steps=len(test_y),
         target_recall=eval_cfg.get("target_event_recall", 0.8),
+        max_lead_steps=H, freq_seconds=freq_seconds,
     )
 
     # ── 8. Plots ─────────────────────────────────────────────────────
@@ -213,7 +222,10 @@ def main(argv: list[str] | None = None) -> None:
     # Lead times (recompute with raw lead times)
     raw_alerts = apply_cooldown(scores >= threshold, cooldown)
     alert_times = [test_ts[i] for i in range(len(raw_alerts)) if raw_alerts[i]]
-    ev_full = event_metrics(alert_times, test_intervals, len(test_y))
+    ev_full = event_metrics(
+        alert_times, test_intervals, len(test_y),
+        max_lead_steps=H, freq_seconds=freq_seconds,
+    )
     plot_lead_time_histogram(ev_full["lead_times"], plot_dir / "lead_time.png")
 
     plot_threshold_sweep(test_sweep, plot_dir / "threshold_sweep.png")

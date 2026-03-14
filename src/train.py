@@ -60,6 +60,9 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("Raw dataset: %d rows.", len(df))
 
     # ── 2. Build sliding windows ─────────────────────────────────────
+    freq_seconds = df["timestamp"].diff().median().total_seconds()
+    logger.info("  Sampling frequency: %.1f seconds.", freq_seconds)
+
     W = cfg["windowing"]["W"]
     H = cfg["windowing"]["H"]
     stride = cfg["windowing"].get("stride", 1)
@@ -129,6 +132,8 @@ def main(argv: list[str] | None = None) -> None:
         cooldown=cooldown,
         total_steps=len(y_val),
         target_recall=target_recall,
+        max_lead_steps=H,
+        freq_seconds=freq_seconds,
     )
 
     threshold_info = {
